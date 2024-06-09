@@ -1,89 +1,113 @@
-import discord
-import asyncio
-import pyaudio
-import numpy as np
-import whisper
+import json
+from openai import OpenAI
+from utils import Action, getFormattedActions
+import time as tim
+import requests
 
-TOKEN = 'NTM4MTQzNjE5NDU5MDU1NjM3.GKmaMi.1QlWpuUPUIXq4WUTCK4hqC4D577pc8vvXCXzkE'  # Replace with your bot's token
-CHANNEL_ID = 793214658194178088  # Replace with your channel ID
-GUILD_ID = 793213521181147178
+with open("config.json", "r") as file:
+    config = json.load(file)
 
-client = discord.Client()
-model = whisper.load_model("small")
+openAICLIENT = OpenAI(api_key=config["OPENAI_KEY"])
 
-
-def start_audio_stream():
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=1024)
-    return stream, p
+weatherapi_url = "https://api.weatherapi.com/v1/current.json"
 
 
-async def continuously_listen(stream):
-    print("Listening for 'Hey Jarvis'...")
+@Action.register
+def weather(location, date=None, time=None):
+    """
+    Returns weather based on params
+    date: YYYY-MM-DD
+    time: 24HR fmt (only hr no minutes) (DO NOT SPECIFY FOR CURRENT WEATHER)
+    """
+    if not date:
+        date = tim.strftime("%Y-%m-%d")
+
+    if not time:
+        response = requests.get(f"{weatherapi_url}?key={config['WEATHERAPI_KEY']}&q={location}&dt={date}")
+        data = response.json()
+        return str(data)
+    else:
+        "Specific weather is not available at the moment"
+
+
+
+
+
+def get_system_message():
+    with open("system_message.txt", "r") as file:
+        message = file.read()
+
+    # replace [DYNAMIC DATE] with current date in Sat Jun 12 5:00 PM format
+    message = message.replace("[DYNAMIC DATE]", tim.strftime("%a %b %d %I:%M %p"))
+    # add actions to the end of the message
+    message += getFormattedActions()
+
+    return message
+
+
+def get_openai_response(message_thread):
+
+    # Call the chat completions API with the message list
+    response = openAICLIENT.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=message_thread
+    )
+
+    # Append the response from OpenAI to the message thread
+    message_thread.append({"role": "assistant", "content": response.choices[0].message.content})
+    return message_thread
+
+
+def parse_action_response(response):
+    if response.startswith("[") and "]" in response:
+        action_name = response[1:response.index("]")]
+        params_str = response[response.index("(") + 1:response.index(")")]
+        params = dict(param.split(": ") for param in params_str.split(", "))
+        return action_name, params
+    return None, None
+
+
+def execute_action(action_name, params):
+    if action_name in Action.actions:
+        action_func = globals().get(action_name.lower())
+        if action_func:
+            return action_func(**params)
+    return "Action not found"
+
+
+def get_jarvis_response(message):
+    # Check if the message is a command, if a key from Action.actions is in the message
+    message_thread = [
+        {"role": "system", "content": get_system_message()},
+        {"role": "user", "content": message},
+    ]
+
+    message_thread = get_openai_response(message_thread)
+
+    # check if any element from Action.actions.keys() list is in message_thread[2]["content"]
+
+    if any(action in message_thread[2]["content"] for action in Action.actions.keys()):
+        action_name, params = parse_action_response(message_thread[2]["content"])
+
+        result = "Action not found"
+        if action_name and params:
+            result = execute_action(action_name, params)
+
+        message_thread.append({"role": "system", "content": "[Action Response] " + result})
+
+        message_thread = get_openai_response(message_thread)
+
+        return message_thread[4]["content"]
+    else:
+        # No action required, return the response as is
+        return message_thread[2]["content"]
+
+
+def main():
     while True:
-        data = stream.read(1024, exception_on_overflow=False)
-        audio = np.frombuffer(data, dtype=np.int16)
-        audio = audio.astype(np.float32) / 32768.0  # Normalize audio
-        audio = whisper.pad_or_trim(audio)  # Adjust length if necessary
-
-        # Process audio chunk
-        mel = whisper.log_mel_spectrogram(audio).to(model.device)
-        result = whisper.decode(model, mel, whisper.DecodingOptions(), task="transcribe")
-
-        if "hey jarvis" in result.text.lower():
-
-            return result.text  # Detected the activation phrase
-        else:
-            print(f"Activation command not recognized: {result.text}")
+        user_input = input("Enter your message for Jarvis: ")
+        print(get_jarvis_response(user_input))
 
 
-async def handle_commands():
-    stream, p = start_audio_stream()
-    try:
-        while True:
-            recognized_text = await continuously_listen(stream)
-            print(f"Activation command recognized: {recognized_text}")
-
-            # Check for specific commands
-            command = recognized_text.lower().replace("hey jarvis", "").strip()
-            if command.startswith("send") and command.endswith("in the groupchat"):
-                message = command[5:-15].strip()
-                channel = client.get_channel(CHANNEL_ID)
-                if channel:
-                    await channel.send(message)
-                else:
-                    print("Channel not found!")
-            elif command.startswith("tell") and command.endswith("in discord"):
-                parts = command.split()
-                if len(parts) >= 3:
-                    nickname = parts[1].lower()
-                    message = ' '.join(parts[2:-2])
-                    guild = client.get_guild(GUILD_ID)
-                    if guild:
-                        user = discord.utils.find(
-                            lambda m: (m.nick and m.nick.lower() == nickname) or m.name.lower() == nickname,
-                            guild.members)
-                        if user:
-                            channel = client.get_channel(CHANNEL_ID)
-                            if channel:
-                                await channel.send(f"{user.mention} {message.strip()}")
-                            else:
-                                print("Channel not found!")
-                        else:
-                            print(f"User with nickname or username '{nickname}' not found in guild.")
-                    else:
-                        print("Guild not found!")
-    finally:
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
-
-
-@client.event
-async def on_ready():
-    print(f'Logged in as {client.user} (ID: {client.user.id})')
-    print('------')
-    await handle_commands()
-
-
-client.run(TOKEN)
+if __name__ == "__main__":
+    main()
