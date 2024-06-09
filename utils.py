@@ -1,11 +1,11 @@
 import inspect
 
 
-def getFormattedActions():
-    formated_string = "\n"
+def get_formatted_actions():
+    formatted_string = "\n"
     for action in Action.actions:
-        formated_string += f"[{action}] ({Action.actions[action]['parameters']})\n{Action.actions[action]['description']}"
-    return formated_string
+        formatted_string += f"[{action}] ({Action.actions[action]['parameters']})\n{Action.actions[action]['description']}"
+    return formatted_string
 
 
 class Action:
